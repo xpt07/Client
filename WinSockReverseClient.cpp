@@ -3,9 +3,11 @@
 #include <iostream>
 #include <string>
 #include <thread>
-#include <vector>
-#include <map>
+#include <atomic>
+#include <conio.h>
+#include <queue>
 #include <mutex>
+#include <condition_variable>
 
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
@@ -19,10 +21,85 @@
 
 using namespace GamesEngineeringBase;
 
-void run_client_loop() {
+std::queue<std::string> send_queue;
+std::queue<std::string> receive_queue;
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+std::atomic<bool> close = false;
+
+// Helper to safely enqueue a message
+void enqueue_message(std::queue<std::string>& queue, const std::string& message) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    queue.push(message);
+    queue_cv.notify_one();
+}
+
+// Helper to safely dequeue a message
+bool dequeue_message(std::queue<std::string>& queue, std::string& message) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    if (queue.empty()) return false;
+    message = queue.front();
+    queue.pop();
+    return true;
+}
+
+void Send(SOCKET client_socket) {
+    while (!close) {
+        std::string message;
+        // Wait for a message from the send queue
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            queue_cv.wait(lock, [] { return !send_queue.empty() || close; });
+            if (close) break;
+
+            message = send_queue.front();
+            send_queue.pop();
+        }
+
+        // Send the message to the server
+        if (send(client_socket, message.c_str(), static_cast<int>(message.size()), 0) == SOCKET_ERROR) {
+            std::cerr << "Send failed with error: " << WSAGetLastError() << std::endl;
+            break;
+        }
+
+        if (message == "!bye") {
+            close = true;
+        }
+    }
+
+    closesocket(client_socket); // Ensure socket is closed when done
+}
+
+void Receive(SOCKET client_socket) {
+    int count = 0;
+    while (!close) {
+        // Receive the reversed sentence from the server
+        char buffer[DEFAULT_BUFFER_SIZE] = { 0 };
+        int bytes_received = recv(client_socket, buffer, DEFAULT_BUFFER_SIZE - 1, 0);
+        if (bytes_received > 0) {
+            buffer[bytes_received] = '\0'; // Null-terminate the received data
+            enqueue_message(receive_queue, buffer); // Enqueue the received message for GUI
+            std::cout << "Received(" << count++ << "): " << buffer << std::endl;
+        }
+        else if (bytes_received == 0) {
+            std::cout << "Connection closed by server." << std::endl;
+        }
+        else if (close) {
+            std::cout << "Terminating connection\n";
+        }
+        else {
+            std::cerr << "Receive failed with error: " << WSAGetLastError() << std::endl;
+        }
+        if (strcmp(buffer, "!bye") == 0) {
+            close = true;
+        }
+    }
+}
+
+void client() {
+
     const char* host = "127.0.0.1"; // Server IP address
     unsigned int port = 65432;
-    std::string sentence = "Hello, server!";
 
     // Initialize WinSock
     WSADATA wsaData;
@@ -60,42 +137,17 @@ void run_client_loop() {
     }
 
     std::cout << "Connected to the server." << std::endl;
-    while (true) {
-        //std::cin >> sentence; 
-        std::cout << "Send to server: ";
-        std::getline(std::cin, sentence);
 
+    //  Send(client_socket);
+     // Receive(client_socket);
+    std::thread t1 = std::thread(Send, client_socket);
+    std::thread t2 = std::thread(Receive, client_socket);
 
-        // Send the sentence to the server
-        if (send(client_socket, sentence.c_str(), static_cast<int>(sentence.size()), 0) == SOCKET_ERROR) {
-            std::cerr << "Send failed with error: " << WSAGetLastError() << std::endl;
-            closesocket(client_socket);
-            WSACleanup();
-            return;
-        }
-
-        if (sentence == "!bye") break;
-
-        std::cout << "Sent: " << sentence << std::endl;
-
-        // Receive the reversed sentence from the server
-        char buffer[DEFAULT_BUFFER_SIZE] = { 0 };
-        int bytes_received = recv(client_socket, buffer, DEFAULT_BUFFER_SIZE - 1, 0);
-        if (bytes_received > 0) {
-            buffer[bytes_received] = '\0'; // Null-terminate the received data
-            std::cout << "Received from server: " << buffer << std::endl;
-        }
-        else if (bytes_received == 0) {
-            std::cout << "Connection closed by server." << std::endl;
-        }
-        else {
-            std::cerr << "Receive failed with error: " << WSAGetLastError() << std::endl;
-        }
-
-    }
+    t1.join();
+    t2.join();
 
     // Cleanup
-    closesocket(client_socket);
+  //  closesocket(client_socket);
     WSACleanup();
 }
 
@@ -129,12 +181,20 @@ void render_gui() {
         // Chat messages on the right
         ImGui::SameLine();
         ImGui::BeginChild("ChatArea", ImVec2(0, -80), true);
+
+        // Display messages from the receive queue
+        std::string received_message;
+        while (dequeue_message(receive_queue, received_message)) {
+            ImGui::TextWrapped(received_message.c_str());
+        }
+
         ImGui::EndChild();
 
         // Message input box and Send button at the bottom
         ImGui::InputText("Message", input_buffer, sizeof(input_buffer));
         ImGui::SameLine();
         if (ImGui::Button("Send")) {
+            enqueue_message(send_queue, input_buffer); // Enqueue message for sending
             memset(input_buffer, 0, sizeof(input_buffer)); // Clear input buffer
         }
 
@@ -153,9 +213,8 @@ void render_gui() {
 
 int main() {
     // Create a thread for networking
-    std::thread network_thread(run_client_loop);
+    std::thread network_thread(client);
 
-    run_client_loop();
     // Run the GUI rendering loop
     render_gui();
 
