@@ -7,6 +7,7 @@
 #include <conio.h>
 #include <queue>
 #include <mutex>
+#include <map>
 #include <condition_variable>
 
 #include "imgui.h"
@@ -23,8 +24,11 @@ using namespace GamesEngineeringBase;
 
 std::queue<std::string> send_queue;
 std::vector<std::string> chat_history;
+std::map<std::string, std::vector<std::string>> private_chat_history;
 std::vector<std::string> user_list;
 std::queue<std::string> receive_queue;
+std::map<std::string, bool> private_chats;
+std::map<std::string, std::string> private_chat_input;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 std::atomic<bool> close = false;
@@ -39,7 +43,23 @@ void enqueue_message(std::queue<std::string>& queue, const std::string& message)
 // Append messages to chat history in a thread-safe manner
 void append_to_chat_history(const std::string& message) {
     std::lock_guard<std::mutex> lock(queue_mutex);
-    chat_history.push_back(message);
+
+    // Check if it's a private message: Format -> "[Private] sender: message"
+    if (message.rfind("[Private]", 0) == 0) {
+        size_t sender_start = message.find(' ') + 1;  // Get index after "[Private] "
+        size_t colon_pos = message.find(':', sender_start);
+        if (colon_pos != std::string::npos) {
+            std::string sender = message.substr(sender_start, colon_pos - sender_start);  // Extract sender
+            std::string msg = message.substr(colon_pos + 2);        // Extract message content
+
+            private_chats[sender] = true;
+            private_chat_history[sender].push_back(sender + ": " + msg);
+            return;
+        }
+    }
+
+    // Otherwise, append to public chat
+    chat_history.emplace_back(message);
 }
 
 // Parse and update the user list from the "USERLIST:" message
@@ -64,15 +84,6 @@ void update_user_list(const std::string& userlist_message) {
     }
 }
 
-// Helper to safely dequeue a message
-bool dequeue_message(std::queue<std::string>& queue, std::string& message) {
-    std::lock_guard<std::mutex> lock(queue_mutex);
-    if (queue.empty()) return false;
-    message = queue.front();
-    queue.pop();
-    return true;
-}
-
 void Send(SOCKET client_socket) {
     while (!close) {
         std::string message;
@@ -81,9 +92,30 @@ void Send(SOCKET client_socket) {
             std::unique_lock<std::mutex> lock(queue_mutex);
             queue_cv.wait(lock, [] { return !send_queue.empty() || close; });
             if (close) break;
-
             message = send_queue.front();
             send_queue.pop();
+        }
+
+        bool is_private = false;
+        std::string recipient, msg_content;
+
+        if (message[0] == '@') {
+            size_t colon_pos = message.find(':');
+            if (colon_pos != std::string::npos) {
+                size_t recipient_start = 1; // Skip '@'
+
+                // Trim spaces before username
+                while (recipient_start < colon_pos && message[recipient_start] == ' ') {
+                    recipient_start++;
+                }
+
+                recipient = message.substr(recipient_start, colon_pos - recipient_start);
+                msg_content = message.substr(colon_pos + 1);
+                is_private = true;
+
+                private_chat_history[recipient].push_back("You: " + msg_content);
+                message = "@" + recipient + ": " + msg_content;  // Reformat message properly before sending
+            }
         }
 
         // Send the message to the server
@@ -92,8 +124,10 @@ void Send(SOCKET client_socket) {
             break;
         }
 
-        // Add sent message to chat history
-        append_to_chat_history("You: " + message);
+        // **Only store public messages in chat_history**
+        if (!is_private) {
+            chat_history.push_back("You: " + message);
+        }
 
         if (message == "!bye") {
             close = true;
@@ -118,22 +152,12 @@ void Receive(SOCKET client_socket) {
                 update_user_list(message);
             }
             else {
-                // Regular chat message
                 append_to_chat_history(message);
             }
-            std::cout << "Received(" << count++ << "): " << buffer << std::endl;
-        }
-        else if (bytes_received == 0) {
-            append_to_chat_history("Connection closed by server.");
-            std::cout << "Connection closed by server." << std::endl;
-        }
-        else if (close) {
-            std::cout << "Terminating connection\n";
+            std::cout << "Received(" << count++ << "): " << message << std::endl;
         }
         else {
             std::cerr << "Receive failed with error: " << WSAGetLastError() << std::endl;
-        }
-        if (strcmp(buffer, "!bye") == 0) {
             close = true;
         }
     }
@@ -194,70 +218,93 @@ void client() {
     WSACleanup();
 }
 
+void render_main_chat(char input_buffer[256]) {
+    ImGui::Begin("Chat Client", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGui::SetWindowSize(ImVec2(800, 600));
+    ImGui::SetWindowPos(ImVec2(0, 0));
+
+    // User list on the left
+    ImGui::BeginChild("Users", ImVec2(150, -80), true);
+    ImGui::Text("Users:");
+    for (const auto& username : user_list) {
+        if (ImGui::Selectable(username.c_str())) {
+            private_chats[username] = true; // Open private chat window
+        }
+    }
+    ImGui::EndChild();
+
+    // Chat messages
+    ImGui::SameLine();
+    ImGui::BeginChild("ChatArea", ImVec2(0, -80), true);
+    for (const auto& message : chat_history) {
+        ImGui::TextWrapped(message.c_str());
+    }
+    ImGui::EndChild();
+
+    // Message input box and Send button
+    ImGui::InputText("Message", input_buffer, 256);
+    ImGui::SameLine();
+    if (ImGui::Button("Send")) {
+        if (strlen(input_buffer) > 0) {
+            enqueue_message(send_queue, input_buffer);
+            memset(input_buffer, 0, sizeof(input_buffer));
+        }
+    }
+
+    ImGui::End();
+}
+
+void render_private_chats(char private_input[256]) {
+    for (auto& chat : private_chats) {
+        if (chat.second) { // Window is open
+            ImGui::Begin(("Private Chat - " + chat.first).c_str(), &chat.second);
+
+            // Chat history
+            ImGui::BeginChild("ChatHistory", ImVec2(350, 300), true);
+            for (const auto& msg : private_chat_history[chat.first]) {
+                ImGui::TextWrapped(msg.c_str());
+            }
+            ImGui::EndChild();
+
+            ImGui::InputText("##PrivateInput", private_input, 256);
+            ImGui::SameLine();
+            if (ImGui::Button("Send")) {
+                if (strlen(private_input) > 0) {
+                    enqueue_message(send_queue, "@" + chat.first + ": " + private_input);
+                    memset(private_input, 0, sizeof(private_input));
+                }
+            }
+
+            ImGui::End();
+        }
+    }
+}
+
 void render_gui() {
-    // Create the main application window
     Window app_window;
     app_window.create(1200, 800, "Client Chat Window");
 
-    // Initialize ImGui with the window and Direct3D context
     ImGuiManager::Initialize(app_window.getHWND(), app_window.getDev(), app_window.getDevContext());
 
-    char input_buffer[256] = { 0 };
+    static char input_buffer[256] = { 0 };
+    static char private_input[256] = { 0 };
 
-    // Main rendering loop
     while (!close) {
         app_window.checkInput();
-
-        // Begin the ImGui frame
         ImGuiManager::BeginFrame();
 
-        // Display any ImGui elements (can be extended later)
-        ImGui::Begin("Chat Client", nullptr, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-        ImGui::SetWindowSize(ImVec2(800, 600));
-        ImGui::SetWindowPos(ImVec2(0, 0));
+        render_main_chat(input_buffer);
+        render_private_chats(private_input);
 
-        // User list on the left
-        ImGui::BeginChild("Users", ImVec2(100, -80), true);
-        ImGui::Text("Users:");
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            for (const auto& username : user_list) {
-                ImGui::TextWrapped(username.c_str());
-            }
-        }
-        ImGui::EndChild();
-
-        // Chat messages on the right
-        ImGui::SameLine();
-        ImGui::BeginChild("ChatArea", ImVec2(0, -80), true);
-        {
-            std::lock_guard<std::mutex> lock(queue_mutex);
-            for (const auto& message : chat_history) {
-                ImGui::TextWrapped(message.c_str());
-            }
-        }
-        ImGui::EndChild();
-
-        // Message input box and Send button at the bottom
-        ImGui::InputText("Message", input_buffer, sizeof(input_buffer));
-        ImGui::SameLine();
-        if (ImGui::Button("Send")) {
-            if (strlen(input_buffer) > 0) { // Only send non-empty messages
-                enqueue_message(send_queue, input_buffer); // Add to send queue
-                memset(input_buffer, 0, sizeof(input_buffer)); // Clear input buffer
-            }
-        }
-
-        ImGui::End();
-
-        // End the ImGui frame
         ImGuiManager::EndFrame();
 
-        // Present the final rendered frame
         app_window.present();
+
+        // Clear the render target view
+        float ClearColor[4] = { 0.0f, 0.0f, 1.0f, 1.0f }; // RGBA
+        app_window.getDevContext()->ClearRenderTargetView(app_window.getRenderTargetView(), ClearColor);
     }
 
-    // Shutdown ImGui
     ImGuiManager::Shutdown();
 }
 
