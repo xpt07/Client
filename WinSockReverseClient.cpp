@@ -22,6 +22,8 @@
 using namespace GamesEngineeringBase;
 
 std::queue<std::string> send_queue;
+std::vector<std::string> chat_history;
+std::vector<std::string> user_list;
 std::queue<std::string> receive_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
@@ -32,6 +34,34 @@ void enqueue_message(std::queue<std::string>& queue, const std::string& message)
     std::lock_guard<std::mutex> lock(queue_mutex);
     queue.push(message);
     queue_cv.notify_one();
+}
+
+// Append messages to chat history in a thread-safe manner
+void append_to_chat_history(const std::string& message) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+    chat_history.push_back(message);
+}
+
+// Parse and update the user list from the "USERLIST:" message
+void update_user_list(const std::string& userlist_message) {
+    std::lock_guard<std::mutex> lock(queue_mutex);
+
+    // Clear the existing user list
+    user_list.clear();
+
+    // Extract usernames from the message: "USERLIST:username1,username2,..."
+    size_t start = 9; // Skip the "USERLIST:" prefix
+    size_t end = userlist_message.find(',', start);
+    while (end != std::string::npos) {
+        user_list.push_back(userlist_message.substr(start, end - start));
+        start = end + 1;
+        end = userlist_message.find(',', start);
+    }
+
+    // Add the last username (if any)
+    if (start < userlist_message.size()) {
+        user_list.push_back(userlist_message.substr(start));
+    }
 }
 
 // Helper to safely dequeue a message
@@ -62,6 +92,9 @@ void Send(SOCKET client_socket) {
             break;
         }
 
+        // Add sent message to chat history
+        append_to_chat_history("You: " + message);
+
         if (message == "!bye") {
             close = true;
         }
@@ -78,10 +111,20 @@ void Receive(SOCKET client_socket) {
         int bytes_received = recv(client_socket, buffer, DEFAULT_BUFFER_SIZE - 1, 0);
         if (bytes_received > 0) {
             buffer[bytes_received] = '\0'; // Null-terminate the received data
-            enqueue_message(receive_queue, buffer); // Enqueue the received message for GUI
+            std::string message(buffer);
+
+            // Check if the message is a user list update
+            if (message.rfind("USERLIST:", 0) == 0) { // Starts with "USERLIST:"
+                update_user_list(message);
+            }
+            else {
+                // Regular chat message
+                append_to_chat_history(message);
+            }
             std::cout << "Received(" << count++ << "): " << buffer << std::endl;
         }
         else if (bytes_received == 0) {
+            append_to_chat_history("Connection closed by server.");
             std::cout << "Connection closed by server." << std::endl;
         }
         else if (close) {
@@ -162,7 +205,7 @@ void render_gui() {
     char input_buffer[256] = { 0 };
 
     // Main rendering loop
-    while (true) {
+    while (!close) {
         app_window.checkInput();
 
         // Begin the ImGui frame
@@ -176,26 +219,33 @@ void render_gui() {
         // User list on the left
         ImGui::BeginChild("Users", ImVec2(100, -80), true);
         ImGui::Text("Users:");
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            for (const auto& username : user_list) {
+                ImGui::TextWrapped(username.c_str());
+            }
+        }
         ImGui::EndChild();
 
         // Chat messages on the right
         ImGui::SameLine();
         ImGui::BeginChild("ChatArea", ImVec2(0, -80), true);
-
-        // Display messages from the receive queue
-        std::string received_message;
-        while (dequeue_message(receive_queue, received_message)) {
-            ImGui::TextWrapped(received_message.c_str());
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex);
+            for (const auto& message : chat_history) {
+                ImGui::TextWrapped(message.c_str());
+            }
         }
-
         ImGui::EndChild();
 
         // Message input box and Send button at the bottom
         ImGui::InputText("Message", input_buffer, sizeof(input_buffer));
         ImGui::SameLine();
         if (ImGui::Button("Send")) {
-            enqueue_message(send_queue, input_buffer); // Enqueue message for sending
-            memset(input_buffer, 0, sizeof(input_buffer)); // Clear input buffer
+            if (strlen(input_buffer) > 0) { // Only send non-empty messages
+                enqueue_message(send_queue, input_buffer); // Add to send queue
+                memset(input_buffer, 0, sizeof(input_buffer)); // Clear input buffer
+            }
         }
 
         ImGui::End();
