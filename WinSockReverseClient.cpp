@@ -28,7 +28,7 @@ std::map<std::string, std::vector<std::string>> private_chat_history;
 std::vector<std::string> user_list;
 std::queue<std::string> receive_queue;
 std::map<std::string, bool> private_chats;
-std::map<std::string, std::string> private_chat_input;
+std::map<std::string, char[256]> private_chat_input;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
 std::atomic<bool> close = false;
@@ -68,6 +68,7 @@ void update_user_list(const std::string& userlist_message) {
 
     // Clear the existing user list
     user_list.clear();
+    std::cout << "Updating user list: " << userlist_message << std::endl; // Debugging
 
     // Extract usernames from the message: "USERLIST:username1,username2,..."
     size_t start = 9; // Skip the "USERLIST:" prefix
@@ -139,22 +140,29 @@ void Send(SOCKET client_socket) {
 
 void Receive(SOCKET client_socket) {
     int count = 0;
+    std::string message_buffer = "";
     while (!close) {
         // Receive the reversed sentence from the server
         char buffer[DEFAULT_BUFFER_SIZE] = { 0 };
         int bytes_received = recv(client_socket, buffer, DEFAULT_BUFFER_SIZE - 1, 0);
         if (bytes_received > 0) {
             buffer[bytes_received] = '\0'; // Null-terminate the received data
-            std::string message(buffer);
+            message_buffer += buffer;
 
-            // Check if the message is a user list update
-            if (message.rfind("USERLIST:", 0) == 0) { // Starts with "USERLIST:"
-                update_user_list(message);
+            size_t pos;
+            while ((pos = message_buffer.find('\n')) != std::string::npos) {
+                std::string message = message_buffer.substr(0, pos);
+                message_buffer.erase(0, pos + 1);
+
+                if (message.rfind("USERLIST:", 0) == 0) {
+                    update_user_list(message);
+                }
+                else {
+                    append_to_chat_history(message);
+                }
+
+                std::cout << "Received(" << count++ << "): " << message << std::endl;
             }
-            else {
-                append_to_chat_history(message);
-            }
-            std::cout << "Received(" << count++ << "): " << message << std::endl;
         }
         else {
             std::cerr << "Receive failed with error: " << WSAGetLastError() << std::endl;
@@ -254,7 +262,7 @@ void render_main_chat(char input_buffer[256]) {
     ImGui::End();
 }
 
-void render_private_chats(char private_input[256]) {
+void render_private_chats() {
     for (auto& chat : private_chats) {
         if (chat.second) { // Window is open
             ImGui::Begin(("Private Chat - " + chat.first).c_str(), &chat.second);
@@ -266,12 +274,17 @@ void render_private_chats(char private_input[256]) {
             }
             ImGui::EndChild();
 
-            ImGui::InputText("##PrivateInput", private_input, 256);
+            // Ensure an input buffer exists for this user
+            if (private_chat_input.find(chat.first) == private_chat_input.end()) {
+                memset(private_chat_input[chat.first], 0, sizeof(private_chat_input[chat.first]));
+            }
+
+            ImGui::InputText("##PrivateInput", private_chat_input[chat.first], 256);
             ImGui::SameLine();
             if (ImGui::Button("Send")) {
-                if (strlen(private_input) > 0) {
-                    enqueue_message(send_queue, "@" + chat.first + ": " + private_input);
-                    memset(private_input, 0, sizeof(private_input));
+                if (strlen(private_chat_input[chat.first]) > 0) {
+                    enqueue_message(send_queue, "@" + chat.first + ": " + private_chat_input[chat.first]);
+                    memset(private_chat_input[chat.first], 0, sizeof(private_chat_input[chat.first]));
                 }
             }
 
@@ -287,14 +300,13 @@ void render_gui() {
     ImGuiManager::Initialize(app_window.getHWND(), app_window.getDev(), app_window.getDevContext());
 
     static char input_buffer[256] = { 0 };
-    static char private_input[256] = { 0 };
 
     while (!close) {
         app_window.checkInput();
         ImGuiManager::BeginFrame();
 
         render_main_chat(input_buffer);
-        render_private_chats(private_input);
+        render_private_chats();
 
         ImGuiManager::EndFrame();
 
