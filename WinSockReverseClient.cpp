@@ -10,9 +10,6 @@
 #include <map>
 #include <condition_variable>
 
-#include <fmod.hpp>
-#include <fmod_errors.h>
-
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -24,38 +21,6 @@
 #define DEFAULT_BUFFER_SIZE 1024
 
 using namespace GamesEngineeringBase;
-
-// FMOD Variables
-FMOD::System* fmodSystem;
-FMOD::Sound* publicMessageSound;
-FMOD::Sound* privateMessageSound;
-FMOD::Channel* channel = nullptr;
-
-// Function to initialize FMOD
-void initFMOD() {
-    FMOD::System_Create(&fmodSystem);
-    fmodSystem->init(512, FMOD_INIT_NORMAL, nullptr);
-
-    // Load sounds (Ensure these files exist in the project directory)
-    fmodSystem->createSound("public_message.mp3", FMOD_CREATESTREAM, nullptr, &publicMessageSound);
-    fmodSystem->createSound("private_message.mp3", FMOD_CREATESTREAM, nullptr, &privateMessageSound);
-}
-
-// Function to play a sound
-void playSound(FMOD::Sound* sound) {
-    if (fmodSystem) {
-        fmodSystem->playSound(sound, nullptr, false, &channel);
-    }
-}
-
-// Cleanup FMOD
-void cleanupFMOD() {
-    publicMessageSound->release();
-    privateMessageSound->release();
-    fmodSystem->close();
-    fmodSystem->release();
-}
-
 
 std::queue<std::string> send_queue;
 std::vector<std::string> chat_history;
@@ -91,7 +56,7 @@ void append_to_chat_history(const std::string& message) {
             private_chat_history[sender].push_back(sender + ": " + msg);
 
             // Play private message sound
-            playSound(privateMessageSound);
+            FMODManager::PlaySoundW(FMODManager::GetPrivateMessageSound());
 
             return;
         }
@@ -101,7 +66,7 @@ void append_to_chat_history(const std::string& message) {
     chat_history.emplace_back(message);
 
     // Play public message sound
-    playSound(publicMessageSound);
+    FMODManager::PlaySound(FMODManager::GetPublicMessageSound());
 }
 
 // Parse and update the user list from the "USERLIST:" message
@@ -364,7 +329,7 @@ void render_gui() {
 
 int main() {
     // Initialize FMOD
-    initFMOD();
+    FMODManager::Initialize();
 
     // Create a thread for networking
     std::thread network_thread(client);
@@ -376,7 +341,7 @@ int main() {
     network_thread.join();
 
     // Cleanup FMOD before exiting
-    cleanupFMOD();
+    FMODManager::Shutdown();
 
     return 0;
 }

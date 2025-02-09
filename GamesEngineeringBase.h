@@ -36,10 +36,13 @@ SOFTWARE.
 #include <atlbase.h>
 #include <Xinput.h>
 #include <math.h>
-
+#include <fmod.hpp>
+#include <fmod_errors.h>
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
+
+
 
 // Link necessary libraries
 #pragma comment(lib, "D3D11.lib")
@@ -56,6 +59,53 @@ namespace GamesEngineeringBase
 	// Macros to extract mouse coordinates from LPARAM
 #define CANVAS_GET_X_LPARAM(lp) ((int)(short)LOWORD(lp))
 #define CANVAS_GET_Y_LPARAM(lp) ((int)(short)HIWORD(lp))
+
+	class FMODManager {
+	private:
+		static FMOD::System* fmodSystem;
+		static FMOD::Sound* publicMessageSound;
+		static FMOD::Sound* privateMessageSound;
+		static FMOD::Channel* channel;
+
+	public:
+		// Initialize FMOD and load sounds
+		static void Initialize() {
+			FMOD::System_Create(&fmodSystem);
+			fmodSystem->init(512, FMOD_INIT_NORMAL, nullptr);
+
+			// Load sounds
+			fmodSystem->createSound("public_message.mp3", FMOD_CREATESTREAM, nullptr, &publicMessageSound);
+			fmodSystem->createSound("private_message.mp3", FMOD_CREATESTREAM, nullptr, &privateMessageSound);
+		}
+
+		// Play a sound
+		static void PlaySound(FMOD::Sound* sound) {
+			if (fmodSystem) {
+				fmodSystem->playSound(sound, nullptr, false, &channel);
+			}
+		}
+
+		// Cleanup FMOD
+		static void Shutdown() {
+			if (publicMessageSound) publicMessageSound->release();
+			if (privateMessageSound) privateMessageSound->release();
+			if (fmodSystem) {
+				fmodSystem->close();
+				fmodSystem->release();
+			}
+		}
+
+		// Getters for sounds
+		static FMOD::Sound* GetPublicMessageSound() { return publicMessageSound; }
+		static FMOD::Sound* GetPrivateMessageSound() { return privateMessageSound; }
+	};
+
+
+	// Define static FMOD variables
+	FMOD::System* FMODManager::fmodSystem = nullptr;
+	FMOD::Sound* FMODManager::publicMessageSound = nullptr;
+	FMOD::Sound* FMODManager::privateMessageSound = nullptr;
+	FMOD::Channel* FMODManager::channel = nullptr;
 
 	class ImGuiManager {
     public:
