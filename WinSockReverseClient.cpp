@@ -10,6 +10,9 @@
 #include <map>
 #include <condition_variable>
 
+#include <fmod.hpp>
+#include <fmod_errors.h>
+
 #include "imgui.h"
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
@@ -21,6 +24,38 @@
 #define DEFAULT_BUFFER_SIZE 1024
 
 using namespace GamesEngineeringBase;
+
+// FMOD Variables
+FMOD::System* fmodSystem;
+FMOD::Sound* publicMessageSound;
+FMOD::Sound* privateMessageSound;
+FMOD::Channel* channel = nullptr;
+
+// Function to initialize FMOD
+void initFMOD() {
+    FMOD::System_Create(&fmodSystem);
+    fmodSystem->init(512, FMOD_INIT_NORMAL, nullptr);
+
+    // Load sounds (Ensure these files exist in the project directory)
+    fmodSystem->createSound("public_message.mp3", FMOD_CREATESTREAM, nullptr, &publicMessageSound);
+    fmodSystem->createSound("private_message.mp3", FMOD_CREATESTREAM, nullptr, &privateMessageSound);
+}
+
+// Function to play a sound
+void playSound(FMOD::Sound* sound) {
+    if (fmodSystem) {
+        fmodSystem->playSound(sound, nullptr, false, &channel);
+    }
+}
+
+// Cleanup FMOD
+void cleanupFMOD() {
+    publicMessageSound->release();
+    privateMessageSound->release();
+    fmodSystem->close();
+    fmodSystem->release();
+}
+
 
 std::queue<std::string> send_queue;
 std::vector<std::string> chat_history;
@@ -54,12 +89,19 @@ void append_to_chat_history(const std::string& message) {
 
             private_chats[sender] = true;
             private_chat_history[sender].push_back(sender + ": " + msg);
+
+            // Play private message sound
+            playSound(privateMessageSound);
+
             return;
         }
     }
 
     // Otherwise, append to public chat
     chat_history.emplace_back(message);
+
+    // Play public message sound
+    playSound(publicMessageSound);
 }
 
 // Parse and update the user list from the "USERLIST:" message
@@ -125,7 +167,7 @@ void Send(SOCKET client_socket) {
             break;
         }
 
-        // **Only store public messages in chat_history**
+        // Only store public messages in chat_history
         if (!is_private) {
             chat_history.push_back("You: " + message);
         }
@@ -268,7 +310,7 @@ void render_private_chats() {
             ImGui::Begin(("Private Chat - " + chat.first).c_str(), &chat.second);
 
             // Chat history
-            ImGui::BeginChild("ChatHistory", ImVec2(350, 300), true);
+            ImGui::BeginChild("PrivateChatArea", ImVec2(350, 300), true);
             for (const auto& msg : private_chat_history[chat.first]) {
                 ImGui::TextWrapped(msg.c_str());
             }
@@ -279,7 +321,7 @@ void render_private_chats() {
                 memset(private_chat_input[chat.first], 0, sizeof(private_chat_input[chat.first]));
             }
 
-            ImGui::InputText("##PrivateInput", private_chat_input[chat.first], 256);
+            ImGui::InputText("PM", private_chat_input[chat.first], 256);
             ImGui::SameLine();
             if (ImGui::Button("Send")) {
                 if (strlen(private_chat_input[chat.first]) > 0) {
@@ -321,6 +363,9 @@ void render_gui() {
 }
 
 int main() {
+    // Initialize FMOD
+    initFMOD();
+
     // Create a thread for networking
     std::thread network_thread(client);
 
@@ -329,6 +374,9 @@ int main() {
 
     // Wait for the networking thread to finish
     network_thread.join();
+
+    // Cleanup FMOD before exiting
+    cleanupFMOD();
 
     return 0;
 }
