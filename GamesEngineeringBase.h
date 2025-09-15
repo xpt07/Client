@@ -49,6 +49,7 @@ SOFTWARE.
 #pragma comment(lib, "D3DCompiler.lib")
 #pragma comment(lib, "WindowsCodecs.lib")
 #pragma comment(lib, "xinput.lib")
+#pragma comment(lib, "fmod_vc.lib")
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
